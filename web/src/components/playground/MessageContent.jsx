@@ -25,6 +25,61 @@ import { Loader2, Check, X, Settings, AlertTriangle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { isAdmin } from '../../helpers/utils';
 
+const extractImageUrl = (item) => {
+  if (!item) return '';
+
+  let url = '';
+  if (typeof item === 'string') {
+    url = item;
+  } else if (typeof item?.image_url?.url === 'string') {
+    url = item.image_url.url;
+  } else if (typeof item?.image_url === 'string') {
+    url = item.image_url;
+  } else if (typeof item?.url === 'string') {
+    url = item.url;
+  }
+
+  const trimmedUrl = typeof url === 'string' ? url.trim() : '';
+  if (!trimmedUrl) return '';
+
+  return trimmedUrl.startsWith('data:image/')
+    ? trimmedUrl.replace(/\s+/g, '')
+    : trimmedUrl;
+};
+
+const collectMessageImageUrls = (message) => {
+  const imageUrls = [];
+
+  if (Array.isArray(message?.content)) {
+    message.content.forEach((item) => {
+      if (item?.type === 'image_url' || item?.image_url || item?.url) {
+        const url = extractImageUrl(item);
+        if (url) imageUrls.push(url);
+      }
+    });
+  }
+
+  if (Array.isArray(message?.images)) {
+    message.images.forEach((item) => {
+      const url = extractImageUrl(item);
+      if (url) imageUrls.push(url);
+    });
+  }
+
+  if (
+    message?.content &&
+    !Array.isArray(message.content) &&
+    Array.isArray(message.content.images)
+  ) {
+    message.content.images.forEach((item) => {
+      const url = extractImageUrl(item);
+      if (url) imageUrls.push(url);
+    });
+  }
+
+  return imageUrls;
+};
+
 const MessageContent = ({
   message,
   className,
@@ -126,6 +181,8 @@ const MessageContent = ({
     return '';
   };
 
+  const imageUrls = collectMessageImageUrls(message);
+
   currentDisplayableFinalContent = getTextContent(message.content);
 
   if (message.role === 'assistant') {
@@ -207,6 +264,7 @@ const MessageContent = ({
   if (
     message.role === 'assistant' &&
     isThinkingStatus &&
+    imageUrls.length === 0 &&
     !finalExtractedThinkingContent &&
     (!finalDisplayableFinalContent ||
       finalDisplayableFinalContent.trim() === '')
@@ -299,18 +357,15 @@ const MessageContent = ({
             const textContent = message.content.find(
               (item) => item.type === 'text',
             );
-            const imageContents = message.content.filter(
-              (item) => item.type === 'image_url',
-            );
 
             return (
               <div>
-                {imageContents.length > 0 && (
+                {imageUrls.length > 0 && (
                   <div className='mb-3 space-y-2'>
-                    {imageContents.map((imgItem, index) => (
+                    {imageUrls.map((imgUrl, index) => (
                       <div key={index} className='max-w-sm'>
                         <img
-                          src={imgItem.image_url.url}
+                          src={imgUrl}
                           alt={`用户上传的图片 ${index + 1}`}
                           className='rounded-lg max-w-full h-auto shadow-sm border'
                           style={{ maxHeight: '300px' }}
@@ -323,7 +378,7 @@ const MessageContent = ({
                           className='text-red-500 text-sm p-2 bg-red-50 rounded-lg border border-red-200'
                           style={{ display: 'none' }}
                         >
-                          图片加载失败: {imgItem.image_url.url}
+                          图片加载失败: {imgUrl?.slice?.(0, 80) || imgUrl}
                         </div>
                       </div>
                     ))}
@@ -348,11 +403,38 @@ const MessageContent = ({
                     </div>
                   )}
               </div>
-            );
-          }
+              );
+            }
 
-          if (typeof message.content === 'string') {
-            if (message.role === 'assistant') {
+            if (imageUrls.length > 0) {
+              return (
+                <div className='mb-3 space-y-2'>
+                  {imageUrls.map((imgUrl, index) => (
+                    <div key={index} className='max-w-sm'>
+                      <img
+                        src={imgUrl}
+                        alt={`用户上传的图片 ${index + 1}`}
+                        className='rounded-lg max-w-full h-auto shadow-sm border'
+                        style={{ maxHeight: '300px' }}
+                        onError={(e) => {
+                          e.target.style.display = 'none';
+                          e.target.nextSibling.style.display = 'block';
+                        }}
+                      />
+                      <div
+                        className='text-red-500 text-sm p-2 bg-red-50 rounded-lg border border-red-200'
+                        style={{ display: 'none' }}
+                      >
+                        图片加载失败: {imgUrl?.slice?.(0, 80) || imgUrl}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              );
+            }
+
+            if (typeof message.content === 'string') {
+              if (message.role === 'assistant') {
               if (
                 finalDisplayableFinalContent &&
                 finalDisplayableFinalContent.trim() !== ''
