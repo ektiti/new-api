@@ -32,6 +32,80 @@ import {
   processIncompleteThinkTags,
 } from '../../helpers';
 
+const normalizeImageItems = (items) => {
+  if (!Array.isArray(items)) return [];
+
+  return items
+    .map((item) => {
+      if (!item) return null;
+
+      let url = '';
+      if (typeof item === 'string') {
+        url = item;
+      } else if (typeof item?.image_url?.url === 'string') {
+        url = item.image_url.url;
+      } else if (typeof item?.image_url === 'string') {
+        url = item.image_url;
+      } else if (typeof item?.url === 'string') {
+        url = item.url;
+      }
+
+      const trimmedUrl = typeof url === 'string' ? url.trim() : '';
+      if (!trimmedUrl) return null;
+
+      return {
+        ...item,
+        type: item?.type || 'image_url',
+        image_url:
+          typeof item?.image_url === 'object' && item?.image_url !== null
+            ? {
+                ...item.image_url,
+                url: trimmedUrl.startsWith('data:image/')
+                  ? trimmedUrl.replace(/\s+/g, '')
+                  : trimmedUrl,
+              }
+            : {
+                url: trimmedUrl.startsWith('data:image/')
+                  ? trimmedUrl.replace(/\s+/g, '')
+                  : trimmedUrl,
+              },
+      };
+    })
+    .filter(Boolean);
+};
+
+const mergeImagesIntoLastAssistant = (prevMessage, normalizedImages) => {
+  if (!normalizedImages.length) return prevMessage;
+
+  const lastMessage = prevMessage[prevMessage.length - 1];
+  if (!lastMessage || lastMessage.role !== 'assistant') {
+    return prevMessage;
+  }
+
+  const mergedImages = [...(lastMessage.images || [])];
+  normalizedImages.forEach((imageItem) => {
+    const imageUrl = imageItem?.image_url?.url;
+    if (
+      imageUrl &&
+      !mergedImages.some((existing) => existing?.image_url?.url === imageUrl)
+    ) {
+      mergedImages.push(imageItem);
+    }
+  });
+
+  if (mergedImages.length === (lastMessage.images || []).length) {
+    return prevMessage;
+  }
+
+  return [
+    ...prevMessage.slice(0, -1),
+    {
+      ...lastMessage,
+      images: mergedImages,
+    },
+  ];
+};
+
 export const useApiRequest = (
   setMessage,
   setDebugData,
@@ -246,25 +320,40 @@ export const useApiRequest = (
             choice.message?.reasoning_content ||
             choice.message?.reasoning ||
             '';
-
+          const normalizedImages = normalizeImageItems(choice.message?.images);
           const processed = processThinkTags(content, reasoningContent);
 
           setMessage((prevMessage) => {
-            const newMessages = [...prevMessage];
+            let newMessages = [...prevMessage];
             const lastMessage = newMessages[newMessages.length - 1];
-            if (lastMessage?.status === MESSAGE_STATUS.LOADING) {
+            if (!lastMessage) {
+              return newMessages;
+            }
+
+            if (normalizedImages.length > 0) {
+              newMessages = mergeImagesIntoLastAssistant(newMessages, normalizedImages);
+            }
+
+            const updatedLastMessage = newMessages[newMessages.length - 1];
+            if (updatedLastMessage?.status === MESSAGE_STATUS.LOADING) {
               const autoCollapseState = applyAutoCollapseLogic(
-                lastMessage,
+                updatedLastMessage,
                 true,
               );
 
               newMessages[newMessages.length - 1] = {
-                ...lastMessage,
+                ...updatedLastMessage,
                 content: processed.content,
                 reasoningContent: processed.reasoningContent,
+                images:
+                  normalizedImages.length > 0
+                    ? newMessages[newMessages.length - 1].images
+                    : updatedLastMessage.images,
                 status: MESSAGE_STATUS.COMPLETE,
                 ...autoCollapseState,
               };
+
+              setTimeout(() => saveMessages(newMessages), 0);
             }
             return newMessages;
           });
@@ -358,7 +447,13 @@ export const useApiRequest = (
             sseMessages: [...(prev.sseMessages || []), e.data],
           }));
 
-          const delta = payload.choices?.[0]?.delta;
+          const choice = payload.choices?.[0];
+          const delta = choice?.delta;
+          const messageData = choice?.message;
+          const normalizedImages = normalizeImageItems([
+            ...(delta?.images || []),
+            ...(messageData?.images || []),
+          ]);
           if (delta) {
             if (delta.reasoning_content) {
               streamMessageUpdate(delta.reasoning_content, 'reasoning');
@@ -368,6 +463,57 @@ export const useApiRequest = (
             }
             if (delta.content) {
               streamMessageUpdate(delta.content, 'content');
+            }
+          }
+
+          if (messageData?.reasoning_content) {
+            streamMessageUpdate(messageData.reasoning_content, 'reasoning');
+          }
+          if (messageData?.reasoning) {
+            streamMessageUpdate(messageData.reasoning, 'reasoning');
+          }
+          if (typeof messageData?.content === 'string' && messageData.content) {
+            streamMessageUpdate(messageData.content, 'content');
+          }
+
+          if (normalizedImages.length > 0) {
+            const hasTextUpdate = Boolean(
+              delta?.content ||
+                delta?.reasoning ||
+                delta?.reasoning_content ||
+                messageData?.content ||
+                messageData?.reasoning ||
+                messageData?.reasoning_content,
+            );
+
+            if (!hasTextUpdate) {
+              setMessage((prevMessage) => {
+                const mergedMessages = mergeImagesIntoLastAssistant(
+                  prevMessage,
+                  normalizedImages,
+                );
+                const lastMessage = mergedMessages[mergedMessages.length - 1];
+
+                if (!lastMessage || lastMessage.role !== 'assistant') {
+                  return mergedMessages;
+                }
+
+                const updatedMessages = [
+                  ...mergedMessages.slice(0, -1),
+                  {
+                    ...lastMessage,
+                    status: MESSAGE_STATUS.COMPLETE,
+                    ...applyAutoCollapseLogic(lastMessage, true),
+                  },
+                ];
+
+                setTimeout(() => saveMessages(updatedMessages), 0);
+                return updatedMessages;
+              });
+            } else {
+              setMessage((prevMessage) =>
+                mergeImagesIntoLastAssistant(prevMessage, normalizedImages),
+              );
             }
           }
         } catch (error) {
